@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    container_name: uptime-api
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - uptime-data:/app/data
+    environment:
+      - PORT=4000
+      - CHECK_INTERVAL_MS=60000
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api          # nginx proxies /api → backend:4000
+    container_name: uptime-ui
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  uptime-data:
