@@ -10,12 +10,20 @@ services:
     environment:
       - PORT=4000
       - CHECK_INTERVAL_MS=60000
+      # ── Email alerts (fill in your credentials) ──────────────────────────────
+      - SMTP_HOST=mail.dynamite.agency
+      - SMTP_PORT=587
+      - SMTP_USER=alerts@dynamite.agency   # your sending email address
+      - SMTP_PASS=YOUR_EMAIL_PASSWORD_HERE  # change this!
+      - SMTP_FROM=Uptime Monitor <alerts@dynamite.agency>
+      - ALERT_EMAIL=kamva@dynamite.agency
+      - EMAIL_COOLDOWN_MS=1800000           # 30 min between repeat alerts
 
   frontend:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: /api          # nginx proxies /api → backend:4000
+        VITE_API_URL: /api
     container_name: uptime-ui
     restart: unless-stopped
     ports:
