@@ -1,403 +1,307 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect } from "react";
+import { ToastContainer, toast } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
 
-const API = import.meta.env.VITE_API_URL || "/api";
+const API = import.meta.env.PROD ? "/api" : "http://localhost:4000";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function fmtMs(ms) {
-  if (ms == null) return "—";
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
-}
-function uptimeColor(pct) {
-  if (pct == null) return "muted";
-  if (pct >= 99) return "green";
-  if (pct >= 95) return "yellow";
-  return "red";
-}
-function siteStatus(site) {
-  if (!site.latest) return "unknown";
-  return site.latest.up ? "up" : "down";
-}
-function timeAgo(ts) {
-  if (!ts) return "—";
-  const d = Date.now() - ts;
-  const m = Math.floor(d / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-function fmtDate(ts) {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleString();
-}
-function exportLogsCSV(logs) {
-  const rows = [["ID","Type","Site","Message","Time"],
-    ...logs.map((l) => [l.id, l.type, l.siteName||"", `"${(l.message||"").replace(/"/g,"'")}"`, new Date(l.createdAt).toISOString()])];
-  const blob = new Blob([rows.map((r) => r.join(",")).join("\n")], { type: "text/csv" });
-  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `logs-${Date.now()}.csv` });
-  a.click();
-}
-
-// ── Toast ─────────────────────────────────────────────────────────────────────
-let _addToast = () => {};
-function toast(msg, type = "info") { _addToast(msg, type); }
-function ToastContainer() {
-  const [toasts, setToasts] = useState([]);
-  _addToast = (msg, type) => {
-    const id = Date.now();
-    setToasts((t) => [...t, { id, msg, type }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
-  };
-  const icons = { success: "✅", error: "❌", info: "ℹ️", warning: "⚠️" };
-  return (
-    <div className="toast-container">
-      {toasts.map((t) => <div key={t.id} className={`toast ${t.type}`}>{icons[t.type]||"ℹ️"} {t.msg}</div>)}
-    </div>
-  );
-}
-
-// ── History Bar ───────────────────────────────────────────────────────────────
-function HistoryBar({ history }) {
-  const n = 30;
-  const padded = [...Array(Math.max(0, n - history.length)).fill(null), ...history.slice(-n)];
-  return (
-    <div className="history-bar" title="Last 30 checks">
-      {padded.map((v, i) => <div key={i} className={`history-tick ${v === null ? "unknown" : v ? "up" : "down"}`} />)}
-    </div>
-  );
-}
-
-// ── Add Site Form ─────────────────────────────────────────────────────────────
-function AddSiteForm({ onAdd }) {
-  const [name, setName] = useState("");
-  const [url, setUrl]   = useState("");
-  const [busy, setBusy] = useState(false);
+// ── Auth Screen ──────────────────────────────────────────────────────────────
+function AuthScreen({ onLogin }) {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
 
   async function submit(e) {
     e.preventDefault();
-    if (!url.trim()) { toast("URL is required", "error"); return; }
-    let u = url.trim();
-    if (!/^https?:\/\//i.test(u)) u = "https://" + u;
-    setBusy(true);
+    setLoading(true);
+    const endpoint = isLogin ? "/auth/login" : "/auth/register";
     try {
-      const res  = await fetch(`${API}/sites`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name: name.trim()||u, url: u }) });
+      const res = await fetch(`${API}${endpoint}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed");
-      toast(`Added ${data.name}`, "success");
-      onAdd(); setName(""); setUrl("");
-    } catch (err) { toast(err.message, "error"); }
-    finally { setBusy(false); }
+      if (!res.ok) throw new Error(data.error || "Authentication failed");
+      localStorage.setItem("uptime_token", data.token);
+      onLogin(data.user);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
-    <form className="add-form" onSubmit={submit} id="add-site-form">
-      <div className="form-group">
-        <label htmlFor="site-name">Display name</label>
-        <input id="site-name" type="text" placeholder="My Website" value={name} onChange={(e) => setName(e.target.value)} />
+    <div className="auth-wrapper">
+      <div className="auth-card">
+        <div className="auth-logo">
+          <div className="status-dot up" style={{marginRight: "8px"}} />
+          Uptime Monitor
+        </div>
+        <h2 className="auth-title">{isLogin ? "Welcome back" : "Create an account"}</h2>
+        <form onSubmit={submit}>
+          <div className="field-group">
+            <label className="field-label">Email</label>
+            <input type="email" required className="field-input" value={email} onChange={e => setEmail(e.target.value)} />
+          </div>
+          <div className="field-group">
+            <label className="field-label">Password</label>
+            <input type="password" required className="field-input" value={password} onChange={e => setPassword(e.target.value)} />
+          </div>
+          <button type="submit" className="btn btn-primary" style={{width: "100%", marginTop: "1rem"}} disabled={loading}>
+            {loading ? <span className="spinner" /> : (isLogin ? "Sign In" : "Register")}
+          </button>
+        </form>
+        <div className="auth-toggle">
+          {isLogin ? "Don't have an account? " : "Already have an account? "}
+          <button type="button" className="btn-link" onClick={() => setIsLogin(!isLogin)}>
+            {isLogin ? "Sign up" : "Log in"}
+          </button>
+        </div>
       </div>
-      <div className="form-group">
-        <label htmlFor="site-url">URL *</label>
-        <input id="site-url" type="text" placeholder="https://example.com" value={url} onChange={(e) => setUrl(e.target.value)} required />
+    </div>
+  );
+}
+
+// ── Components ────────────────────────────────────────────────────────────────
+function SiteCard({ site, onRemove, onRefresh }) {
+  const up = site.latest?.up;
+  const statusClass = up === true ? "up" : up === false ? "down" : "pending";
+  const [checking, setChecking] = useState(false);
+
+  async function checkNow() {
+    setChecking(true);
+    const token = localStorage.getItem("uptime_token");
+    try {
+      await fetch(`${API}/sites/${site.id}/check`, { method:"POST", headers: { "Authorization": `Bearer ${token}` } });
+      onRefresh();
+    } catch { toast.error("Check failed"); }
+    finally { setChecking(false); }
+  }
+
+  return (
+    <div className="site-card">
+      <div className="card-header">
+        <div>
+          <h3 className="site-name">{site.name}</h3>
+          <a href={site.url} target="_blank" rel="noreferrer" className="site-url">{site.url}</a>
+        </div>
+        <div className={`status-badge ${statusClass}`}>
+          {up === true ? "UP" : up === false ? "DOWN" : "WAITING"}
+        </div>
       </div>
-      <button className="btn btn-primary" type="submit" disabled={busy} id="add-site-submit">
-        {busy ? <span className="spinner" /> : "＋ Add"}
-      </button>
+      <div className="card-stats">
+        <div className="stat-col"><div className="stat-label">Uptime (24h)</div><div className="stat-value">{site.uptimePct ?? "—"}%</div></div>
+        <div className="stat-col"><div className="stat-label">Response (avg)</div><div className="stat-value">{site.avgResponseMs ? `${site.avgResponseMs}ms` : "—"}</div></div>
+      </div>
+      <div className="history-bar">
+        {Array.from({ length: 48 }).map((_, i) => {
+          const check = site.history && site.history[site.history.length - 48 + i];
+          const cl = check === true ? "up" : check === false ? "down" : "empty";
+          return <div key={i} className={`history-tick ${cl}`} />;
+        })}
+      </div>
+      <div className="card-actions">
+        <button className="btn btn-ghost" onClick={() => onRemove(site.id)}>Delete</button>
+        <button className="btn btn-primary" onClick={checkNow} disabled={checking}>
+          {checking ? <span className="spinner" /> : "Check Now"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AddSiteForm({ onAdd }) {
+  const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setAdding(true);
+    const token = localStorage.getItem("uptime_token");
+    try {
+      const res = await fetch(`${API}/sites`, {
+        method:"POST", headers:{"Content-Type":"application/json", "Authorization": `Bearer ${token}`},
+        body: JSON.stringify({ url, name })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to add site");
+      setUrl(""); setName("");
+      toast.success("Site added");
+      onAdd();
+    } catch(err) { toast.error(err.message); }
+    finally { setAdding(false); }
+  }
+
+  return (
+    <form className="add-site-form" onSubmit={submit}>
+      <input className="input" placeholder="https://example.com" value={url} onChange={(e)=>setUrl(e.target.value)} required type="url" />
+      <input className="input" placeholder="Name (optional)" value={name} onChange={(e)=>setName(e.target.value)} />
+      <button className="btn btn-primary" disabled={adding}>{adding ? <span className="spinner" /> : "Add Site"}</button>
     </form>
   );
 }
 
-// ── Site Card ─────────────────────────────────────────────────────────────────
-function SiteCard({ site, onRefresh }) {
-  const [busy, setBusy] = useState(false);
-  const status = siteStatus(site);
-
-  async function checkNow() {
-    setBusy(true);
-    try {
-      const res  = await fetch(`${API}/sites/${site.id}/check`, { method:"POST" });
-      const data = await res.json();
-      toast(`${site.name}: ${data.up ? "UP" : "DOWN"} (${fmtMs(data.responseMs)})`, data.up ? "success" : "error");
-      onRefresh();
-    } catch { toast("Check failed", "error"); }
-    finally { setBusy(false); }
-  }
-
-  async function remove() {
-    if (!confirm(`Remove "${site.name}"?`)) return;
-    try {
-      await fetch(`${API}/sites/${site.id}`, { method:"DELETE" });
-      toast(`Removed ${site.name}`, "info"); onRefresh();
-    } catch { toast("Delete failed", "error"); }
-  }
-
-  return (
-    <div className={`site-card ${status}`} id={`site-card-${site.id}`}>
-      <div className={`status-dot ${status}`} />
-      <div className="site-info">
-        <div className="site-name">{site.name}</div>
-        <div className="site-url">
-          <a href={site.url} target="_blank" rel="noopener noreferrer">{site.url}</a>
-        </div>
-        <div className="site-last">{timeAgo(site.latest?.checkedAt)}</div>
-      </div>
-      <HistoryBar history={site.history || []} />
-      <div className="site-meta">
-        <div className="meta-item">
-          <span className="meta-label">Status</span>
-          <span className={`badge ${status}`}>{status === "unknown" ? "—" : status.toUpperCase()}</span>
-        </div>
-        <div className="meta-item">
-          <span className="meta-label">Response</span>
-          <span className={`meta-value ${site.latest?.up ? "green" : "red"}`}>{fmtMs(site.latest?.responseMs)}</span>
-        </div>
-        <div className="meta-item">
-          <span className="meta-label">Avg (24h)</span>
-          <span className="meta-value muted">{fmtMs(site.avgResponseMs)}</span>
-        </div>
-        <div className="meta-item">
-          <span className="meta-label">Uptime</span>
-          <span className={`meta-value ${uptimeColor(site.uptimePct)}`}>{site.uptimePct != null ? `${site.uptimePct}%` : "—"}</span>
-        </div>
-        <div className="meta-item">
-          <span className="meta-label">HTTP</span>
-          <span className="meta-value muted">{site.latest?.statusCode ?? "—"}</span>
-        </div>
-      </div>
-      <div className="site-actions">
-        <button className="icon-btn" title="Check now" id={`check-btn-${site.id}`} onClick={checkNow} disabled={busy}>
-          {busy ? <span className="spinner" /> : "↻"}
-        </button>
-        <button className="icon-btn del" title="Remove" id={`delete-btn-${site.id}`} onClick={remove}>✕</button>
-      </div>
-    </div>
-  );
-}
-
-// ── Stats Row ─────────────────────────────────────────────────────────────────
-function StatsRow({ sites, globalStats }) {
-  const up   = sites.filter((s) => siteStatus(s) === "up").length;
-  const down = sites.filter((s) => siteStatus(s) === "down").length;
-  const avg  = sites.filter((s) => s.uptimePct != null);
-  const avgPct = avg.length ? Math.round(avg.reduce((a, s) => a + s.uptimePct, 0) / avg.length) : null;
-
-  return (
-    <div className="stats-row">
-      <div className="stat-card"><span className="stat-label">Total Sites</span><span className="stat-value blue">{sites.length}</span></div>
-      <div className="stat-card"><span className="stat-label">Online</span><span className="stat-value green">{up}</span></div>
-      <div className="stat-card"><span className="stat-label">Down</span><span className="stat-value red">{down}</span></div>
-      <div className="stat-card"><span className="stat-label">Avg Uptime</span><span className={`stat-value ${uptimeColor(avgPct)}`}>{avgPct != null ? `${avgPct}%` : "—"}</span></div>
-      <div className="stat-card"><span className="stat-label">Avg Response</span><span className="stat-value blue">{fmtMs(globalStats?.avgResponseMs)}</span></div>
-      <div className="stat-card"><span className="stat-label">Incidents</span><span className="stat-value yellow">{globalStats?.totalIncidents ?? "—"}</span></div>
-    </div>
-  );
-}
-
-// ── Dashboard Tab ─────────────────────────────────────────────────────────────
+// ── Tabs ──────────────────────────────────────────────────────────────────────
 function DashboardTab({ sites, globalStats, loading, onRefresh }) {
-  const [showForm, setShowForm] = useState(false);
-  const [search,   setSearch]   = useState("");
-  const [sort,     setSort]     = useState("name");
-  const [checkAll, setCheckAll] = useState(false);
-
-  async function handleCheckAll() {
-    setCheckAll(true);
-    try {
-      await fetch(`${API}/check-all`, { method:"POST" });
-      toast("All sites checked!", "success");
-      onRefresh();
-    } catch { toast("Check-all failed", "error"); }
-    finally { setCheckAll(false); }
-  }
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("name"); // name, uptime, response
 
   const filtered = sites
-    .filter((s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.url.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => {
-      if (sort === "status") return siteStatus(a).localeCompare(siteStatus(b));
-      if (sort === "uptime") return (b.uptimePct ?? -1) - (a.uptimePct ?? -1);
-      if (sort === "response") return (a.latest?.responseMs ?? 9999) - (b.latest?.responseMs ?? 9999);
+    .filter(s => s.name.toLowerCase().includes(search.toLowerCase()) || s.url.toLowerCase().includes(search.toLowerCase()))
+    .sort((a,b) => {
+      if (sort === "uptime") return (a.uptimePct ?? 0) - (b.uptimePct ?? 0);
+      if (sort === "response") return (b.avgResponseMs ?? 0) - (a.avgResponseMs ?? 0);
       return a.name.localeCompare(b.name);
     });
 
+  async function remove(id) {
+    if (!confirm("Remove this site?")) return;
+    const token = localStorage.getItem("uptime_token");
+    await fetch(`${API}/sites/${id}`, { method:"DELETE", headers: { "Authorization": `Bearer ${token}` } });
+    onRefresh();
+  }
+
   return (
     <div>
-      <StatsRow sites={sites} globalStats={globalStats} />
       <div className="toolbar">
-        <div className="toolbar-left">
-          <input className="search-input" placeholder="🔍 Search sites…" value={search} onChange={(e) => setSearch(e.target.value)} id="site-search" />
-          <select className="select-input" value={sort} onChange={(e) => setSort(e.target.value)} id="site-sort">
-            <option value="name">Sort: Name</option>
-            <option value="status">Sort: Status</option>
-            <option value="uptime">Sort: Uptime</option>
-            <option value="response">Sort: Response</option>
+        <AddSiteForm onAdd={onRefresh} />
+        <div className="controls">
+          <input className="input" placeholder="Search sites..." value={search} onChange={(e)=>setSearch(e.target.value)} />
+          <select className="input" value={sort} onChange={(e)=>setSort(e.target.value)}>
+            <option value="name">Sort by Name</option>
+            <option value="uptime">Sort by Uptime (Low first)</option>
+            <option value="response">Sort by Response (Slow first)</option>
           </select>
         </div>
-        <div style={{display:"flex",gap:".6rem"}}>
-          <button id="check-all-btn" className="btn btn-ghost" onClick={handleCheckAll} disabled={checkAll || sites.length === 0}>
-            {checkAll ? <span className="spinner" /> : "↻"} Check all
-          </button>
-          <button id="add-site-btn" className="btn btn-primary" onClick={() => setShowForm((v) => !v)}>
-            {showForm ? "✕ Cancel" : "＋ Add site"}
-          </button>
-        </div>
       </div>
-
-      {showForm && <AddSiteForm onAdd={() => { onRefresh(); setShowForm(false); }} />}
-
-      <h2 className="section-title">Monitored sites ({filtered.length})</h2>
-
       {loading ? (
-        <div className="empty-state"><div className="emoji">⏳</div><p>Loading…</p></div>
+        <div className="empty-state"><div className="emoji">⏳</div><p>Loading your sites…</p></div>
       ) : filtered.length === 0 ? (
-        <div className="empty-state"><div className="emoji">🌐</div><p>{sites.length === 0 ? "No sites yet. Click + Add site." : "No sites match your search."}</p></div>
+        <div className="empty-state">
+          <div className="emoji">🌐</div>
+          <p>{sites.length ? "No sites match your search." : "You aren't monitoring any sites yet. Add one above!"}</p>
+        </div>
       ) : (
-        <div className="sites-list">
-          {filtered.map((s) => <SiteCard key={s.id} site={s} onRefresh={onRefresh} />)}
+        <div className="grid">
+          {filtered.map(s => <SiteCard key={s.id} site={s} onRemove={remove} onRefresh={onRefresh} />)}
         </div>
       )}
     </div>
   );
 }
 
-// ── Log type badge colours ────────────────────────────────────────────────────
-const LOG_COLORS = { DOWN:"red", RECOVERY:"green", BOT:"purple", ERROR:"orange", INFO:"blue", CHECK:"muted" };
-
-function LogBadge({ type }) {
-  return <span className={`log-badge log-${(LOG_COLORS[type]||"muted")}`}>{type}</span>;
-}
-
-// ── Logs Tab ──────────────────────────────────────────────────────────────────
 function LogsTab({ sites }) {
-  const [logs,     setLogs]   = useState([]);
-  const [loading,  setLoad]   = useState(true);
-  const [typeF,    setTypeF]  = useState("");
-  const [siteF,    setSiteF]  = useState("");
+  const [logs, setLogs] = useState([]);
+  const [typeFilter, setTypeFilter] = useState("");
+  const [siteFilter, setSiteFilter] = useState("");
 
-  const fetchLogs = useCallback(async () => {
-    try {
-      const params = new URLSearchParams({ limit: 500 });
-      if (typeF) params.set("type", typeF);
-      if (siteF) params.set("siteId", siteF);
-      const res  = await fetch(`${API}/logs?${params}`);
-      const data = await res.json();
-      setLogs(Array.isArray(data) ? data : []);
-    } catch { toast("Failed to load logs", "error"); }
-    finally { setLoad(false); }
-  }, [typeF, siteF]);
+  const fetchLogs = () => {
+    const token = localStorage.getItem("uptime_token");
+    const q = new URLSearchParams();
+    if (typeFilter) q.append("type", typeFilter);
+    if (siteFilter) q.append("siteId", siteFilter);
+    fetch(`${API}/logs?${q}`, { headers: { "Authorization": `Bearer ${token}` } }).then(r=>r.json()).then(setLogs);
+  };
 
-  useEffect(() => { fetchLogs(); const t = setInterval(fetchLogs, 15_000); return () => clearInterval(t); }, [fetchLogs]);
+  useEffect(fetchLogs, [typeFilter, siteFilter]);
 
-  async function clearAll() {
-    if (!confirm("Clear all logs? This cannot be undone.")) return;
-    await fetch(`${API}/logs`, { method:"DELETE" });
-    toast("Logs cleared", "info");
+  async function clearLogs() {
+    if (!confirm("Clear all your logs?")) return;
+    const token = localStorage.getItem("uptime_token");
+    await fetch(`${API}/logs`, { method:"DELETE", headers: { "Authorization": `Bearer ${token}` } });
     fetchLogs();
   }
 
-  return (
-    <div>
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <select className="select-input" value={typeF} onChange={(e) => setTypeF(e.target.value)} id="log-type-filter">
-            <option value="">All types</option>
-            {["DOWN","RECOVERY","BOT","ERROR","INFO","CHECK"].map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <select className="select-input" value={siteF} onChange={(e) => setSiteF(e.target.value)} id="log-site-filter">
-            <option value="">All sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </div>
-        <div style={{display:"flex",gap:".6rem"}}>
-          <button className="btn btn-ghost" onClick={() => exportLogsCSV(logs)} id="export-logs-btn">⬇ Export CSV</button>
-          <button className="btn btn-danger" onClick={clearAll} id="clear-logs-btn">🗑 Clear logs</button>
-          <button className="btn btn-ghost" onClick={fetchLogs} id="refresh-logs-btn">↻ Refresh</button>
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="empty-state"><div className="emoji">⏳</div><p>Loading logs…</p></div>
-      ) : logs.length === 0 ? (
-        <div className="empty-state"><div className="emoji">📋</div><p>No logs yet.</p></div>
-      ) : (
-        <div className="log-table-wrap">
-          <table className="log-table">
-            <thead><tr><th>Type</th><th>Site</th><th>Message</th><th>Time</th></tr></thead>
-            <tbody>
-              {logs.map((l) => (
-                <tr key={l.id} className={`log-row log-row-${LOG_COLORS[l.type]||"muted"}`}>
-                  <td><LogBadge type={l.type} /></td>
-                  <td className="log-site">{l.siteName || <span className="muted">—</span>}</td>
-                  <td className="log-msg">{l.message}</td>
-                  <td className="log-time" title={fmtDate(l.createdAt)}>{timeAgo(l.createdAt)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Incidents Tab ─────────────────────────────────────────────────────────────
-function IncidentsTab({ sites }) {
-  const [logs, setLogs] = useState([]);
-
-  useEffect(() => {
-    fetch(`${API}/logs?limit=2000`)
-      .then((r) => r.json())
-      .then((data) => setLogs(Array.isArray(data) ? data : []));
-  }, []);
-
-  // Build incident list: pair DOWN with next RECOVERY for same site
-  const incidents = [];
-  const downMap = {}; // siteId → log
-  [...logs].reverse().forEach((l) => {
-    if (l.type === "DOWN" && !l.meta?.reminder) {
-      downMap[l.siteId] = l;
-    } else if (l.type === "RECOVERY" && downMap[l.siteId]) {
-      const d = downMap[l.siteId];
-      incidents.push({ id: d.id, siteName: d.siteName, siteId: d.siteId, wentDown: d.createdAt, recovered: l.createdAt, duration: l.createdAt - d.createdAt });
-      delete downMap[l.siteId];
-    }
-  });
-  // Still-down sites (no recovery yet)
-  Object.values(downMap).forEach((d) => {
-    incidents.push({ id: d.id, siteName: d.siteName, siteId: d.siteId, wentDown: d.createdAt, recovered: null, duration: Date.now() - d.createdAt });
-  });
-  incidents.sort((a, b) => b.wentDown - a.wentDown);
-
-  function fmtDur(ms) {
-    const m = Math.floor(ms / 60000);
-    if (m < 60) return `${m}m`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ${m % 60}m`;
-    return `${Math.floor(h / 24)}d ${h % 24}h`;
+  function downloadCSV() {
+    const header = "Time,Type,Site,Message\n";
+    const rows = logs.map(l => `"${new Date(l.createdAt).toISOString()}","${l.type}","${l.siteName || ""}","${l.message}"`).join("\n");
+    const blob = new Blob([header + rows], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'uptime-logs.csv'; a.click();
   }
 
   return (
     <div>
-      <h2 className="section-title">Incident History ({incidents.length})</h2>
+      <div className="toolbar" style={{justifyContent: "space-between"}}>
+        <div className="controls">
+          <select className="input" value={typeFilter} onChange={(e)=>setTypeFilter(e.target.value)}>
+            <option value="">All Events</option>
+            <option value="DOWN">Down</option>
+            <option value="RECOVERY">Recovery</option>
+            <option value="BOT">Bot / Scanner</option>
+            <option value="ERROR">Error</option>
+            <option value="INFO">Info</option>
+          </select>
+          <select className="input" value={siteFilter} onChange={(e)=>setSiteFilter(e.target.value)}>
+            <option value="">All Sites</option>
+            {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        <div className="controls">
+          <button className="btn btn-ghost" onClick={downloadCSV}>⬇ CSV</button>
+          <button className="btn btn-ghost" style={{color:"var(--red)"}} onClick={clearLogs}>🗑 Clear</button>
+        </div>
+      </div>
+      <div className="logs-table-wrap">
+        <table className="logs-table">
+          <thead><tr><th>Time</th><th>Type</th><th>Site</th><th>Message</th></tr></thead>
+          <tbody>
+            {logs.length === 0 ? <tr><td colSpan="4" style={{textAlign:"center", padding:"2rem"}}>No logs found</td></tr> : null}
+            {logs.map(l => (
+              <tr key={l.id}>
+                <td style={{whiteSpace:"nowrap", color:"var(--muted)"}}>{new Date(l.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</td>
+                <td><span className={`badge ${l.type.toLowerCase()}`}>{l.type}</span></td>
+                <td>{l.siteName || "—"}</td>
+                <td style={{width:"100%"}}>{l.message}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function IncidentsTab({ sites }) {
+  const [logs, setLogs] = useState([]);
+  useEffect(() => {
+    const token = localStorage.getItem("uptime_token");
+    fetch(`${API}/logs`, { headers: { "Authorization": `Bearer ${token}` } }).then(r=>r.json()).then(setLogs);
+  }, []);
+
+  const incidents = [];
+  const downEvents = logs.filter(l => l.type === "DOWN" && !l.meta?.reminder).reverse();
+  const upEvents   = logs.filter(l => l.type === "RECOVERY").reverse();
+
+  downEvents.forEach(down => {
+    const recovery = upEvents.find(up => up.siteId === down.siteId && up.createdAt > down.createdAt);
+    incidents.push({
+      id: down.id, siteName: down.siteName,
+      downAt: down.createdAt, upAt: recovery ? recovery.createdAt : null,
+      durationMs: recovery ? (recovery.createdAt - down.createdAt) : (Date.now() - down.createdAt),
+      resolved: !!recovery
+    });
+  });
+  incidents.sort((a,b) => b.downAt - a.downAt);
+
+  return (
+    <div>
+      <h2 className="section-title">Incident History</h2>
       {incidents.length === 0 ? (
-        <div className="empty-state"><div className="emoji">🎉</div><p>No incidents recorded.</p></div>
+        <div className="empty-state"><div className="emoji">🎉</div><p>No incidents recorded! 100% uptime.</p></div>
       ) : (
         <div className="incident-list">
-          {incidents.map((inc) => (
-            <div key={inc.id} className={`incident-card ${inc.recovered ? "resolved" : "ongoing"}`}>
-              <div className="incident-status">
-                <span className={`badge ${inc.recovered ? "up" : "down"}`}>{inc.recovered ? "RESOLVED" : "ONGOING"}</span>
+          {incidents.map(inc => (
+            <div key={inc.id} className={`incident-card ${inc.resolved ? "resolved" : "ongoing"}`}>
+              <div className="incident-icon">{inc.resolved ? "✅" : "🔴"}</div>
+              <div className="incident-details">
+                <div className="incident-title"><strong>{inc.siteName}</strong> {inc.resolved ? "outage resolved" : "is currently down"}</div>
+                <div className="incident-time">{new Date(inc.downAt).toLocaleString()}</div>
               </div>
-              <div className="incident-info">
-                <div className="incident-site">{inc.siteName || `Site #${inc.siteId}`}</div>
-                <div className="incident-times">
-                  <span>⬇ {fmtDate(inc.wentDown)}</span>
-                  {inc.recovered && <span>⬆ {fmtDate(inc.recovered)}</span>}
-                </div>
-              </div>
-              <div className="incident-duration">
-                <span className="meta-label">Duration</span>
-                <span className={`meta-value ${inc.recovered ? "muted" : "red"}`}>{fmtDur(inc.duration)}</span>
-              </div>
+              <div className="incident-duration">{Math.round(inc.durationMs / 60000)} min</div>
             </div>
           ))}
         </div>
@@ -406,7 +310,6 @@ function IncidentsTab({ sites }) {
   );
 }
 
-// ── Settings Tab ──────────────────────────────────────────────────────────────
 function SettingsTab({ globalStats, onStatsRefresh }) {
   const MASKED = "••••••••";
   const [form, setForm] = useState(null);
@@ -415,16 +318,18 @@ function SettingsTab({ globalStats, onStatsRefresh }) {
   const [showPass, setShowPass] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/settings`)
+    const token = localStorage.getItem("uptime_token");
+    fetch(`${API}/settings`, { headers: { "Authorization": `Bearer ${token}` } })
       .then((r) => r.json())
       .then((d) => setForm({
+        alertEmail:      d.alertEmail      || "",
+        emailCooldownMs: String(d.emailCooldownMs || 1800000),
+        // Admin fields
         smtpHost:        d.smtpHost        || "",
         smtpPort:        String(d.smtpPort || 587),
         smtpUser:        d.smtpUser        || "",
         smtpPass:        d.smtpPassSet ? MASKED : "",
         smtpFrom:        d.smtpFrom        || "",
-        alertEmail:      d.alertEmail      || "",
-        emailCooldownMs: String(d.emailCooldownMs || 1800000),
         checkIntervalMs: String(d.checkIntervalMs || 60000),
       }))
       .catch(() => toast("Could not load settings", "error"));
@@ -435,15 +340,21 @@ function SettingsTab({ globalStats, onStatsRefresh }) {
   async function save(e) {
     e.preventDefault();
     setSaving(true);
+    const token = localStorage.getItem("uptime_token");
     try {
       const body = { ...form };
-      // Don't send masked placeholder back
       if (body.smtpPass === MASKED) delete body.smtpPass;
-      body.smtpPort        = parseInt(body.smtpPort);
       body.emailCooldownMs = parseInt(body.emailCooldownMs);
-      body.checkIntervalMs = parseInt(body.checkIntervalMs);
+      if (globalStats?.isAdmin) {
+        body.smtpPort = parseInt(body.smtpPort);
+        body.checkIntervalMs = parseInt(body.checkIntervalMs);
+      }
 
-      const res  = await fetch(`${API}/settings`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const res = await fetch(`${API}/settings`, { 
+        method:"POST", 
+        headers:{"Content-Type":"application/json", "Authorization": `Bearer ${token}`}, 
+        body: JSON.stringify(body) 
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Save failed");
       toast("Settings saved!", "success");
@@ -454,12 +365,13 @@ function SettingsTab({ globalStats, onStatsRefresh }) {
 
   async function testEmail() {
     setTesting(true);
+    const token = localStorage.getItem("uptime_token");
     try {
-      const res  = await fetch(`${API}/settings/test-email`, { method:"POST" });
+      const res  = await fetch(`${API}/settings/test-email`, { method:"POST", headers: { "Authorization": `Bearer ${token}` } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Test failed");
       toast(`Test email sent to ${form?.alertEmail}`, "success");
-    } catch (err) { toast(err.message, "error"); }
+    } catch (err) { toast.error(err.message); }
     finally { setTesting(false); }
   }
 
@@ -471,14 +383,14 @@ function SettingsTab({ globalStats, onStatsRefresh }) {
       <form onSubmit={save} id="settings-form">
         <div className="settings-grid">
 
-          {/* Email Notifications */}
+          {/* Personal Notifications */}
           <div className="settings-card">
-            <h3 className="settings-card-title">📧 Email Notifications</h3>
+            <h3 className="settings-card-title">📧 Personal Alerts</h3>
             <div className={`email-status-banner ${globalStats?.emailEnabled ? "enabled" : "disabled"}`}>
-              {globalStats?.emailEnabled ? "✅ Email alerts are ENABLED" : "⚠ Email alerts are DISABLED — fill in SMTP credentials below"}
+              {globalStats?.emailEnabled ? "✅ Global email system is ENABLED" : "⚠ Global email system is DISABLED — ask admin to configure SMTP."}
             </div>
             <div className="field-group">
-              <label className="field-label">Alert recipient</label>
+              <label className="field-label">Send alerts to</label>
               <input id="alert-email" className="field-input" type="email" value={form.alertEmail}
                 onChange={(e) => set("alertEmail", e.target.value)} placeholder="kamva@dynamite.agency" />
             </div>
@@ -495,99 +407,86 @@ function SettingsTab({ globalStats, onStatsRefresh }) {
             </div>
           </div>
 
-          {/* SMTP Credentials */}
-          <div className="settings-card">
-            <h3 className="settings-card-title">🔐 SMTP Credentials</h3>
-            <div className="field-group">
-              <label className="field-label">SMTP host</label>
-              <input id="smtp-host" className="field-input" type="text" value={form.smtpHost}
-                onChange={(e) => set("smtpHost", e.target.value)} placeholder="mail.dynamite.agency" />
-            </div>
-            <div className="field-row">
-              <div className="field-group" style={{flex:1}}>
-                <label className="field-label">Port</label>
-                <input id="smtp-port" className="field-input" type="number" value={form.smtpPort}
-                  onChange={(e) => set("smtpPort", e.target.value)} placeholder="587" />
-              </div>
-            </div>
-            <div className="field-group">
-              <label className="field-label">SMTP username / email</label>
-              <input id="smtp-user" className="field-input" type="text" value={form.smtpUser}
-                onChange={(e) => set("smtpUser", e.target.value)} placeholder="alerts@dynamite.agency" />
-            </div>
-            <div className="field-group">
-              <label className="field-label">SMTP password</label>
-              <div className="pass-wrap">
-                <input id="smtp-pass" className="field-input" type={showPass ? "text" : "password"}
-                  value={form.smtpPass}
-                  onChange={(e) => set("smtpPass", e.target.value)}
-                  onFocus={() => { if (form.smtpPass === MASKED) set("smtpPass", ""); }}
-                  placeholder="Enter password to update" />
-                <button type="button" className="pass-toggle" onClick={() => setShowPass((v) => !v)}>
-                  {showPass ? "🙈" : "👁"}
-                </button>
-              </div>
-            </div>
-            <div className="field-group">
-              <label className="field-label">From address</label>
-              <input id="smtp-from" className="field-input" type="text" value={form.smtpFrom}
-                onChange={(e) => set("smtpFrom", e.target.value)} placeholder="Uptime Monitor <alerts@dynamite.agency>" />
-            </div>
-          </div>
-
           {/* Monitor settings */}
           <div className="settings-card">
             <h3 className="settings-card-title">⏱ Monitor Settings</h3>
-            <div className="field-group">
-              <label className="field-label">Check interval</label>
-              <select id="check-interval" className="field-input field-select" value={form.checkIntervalMs}
-                onChange={(e) => set("checkIntervalMs", e.target.value)}>
-                <option value="30000">30 seconds</option>
-                <option value="60000">1 minute</option>
-                <option value="120000">2 minutes</option>
-                <option value="300000">5 minutes</option>
-                <option value="600000">10 minutes</option>
-                <option value="1800000">30 minutes</option>
-              </select>
-            </div>
-            <div className="settings-row" style={{marginTop:"1rem"}}>
-              <span className="settings-label">Total checks run</span>
+            {globalStats?.isAdmin ? (
+              <div className="field-group" style={{marginBottom: "1rem"}}>
+                <label className="field-label">Global Check interval (Admin)</label>
+                <select className="field-input field-select" value={form.checkIntervalMs}
+                  onChange={(e) => set("checkIntervalMs", e.target.value)}>
+                  <option value="30000">30 seconds</option>
+                  <option value="60000">1 minute</option>
+                  <option value="120000">2 minutes</option>
+                  <option value="300000">5 minutes</option>
+                  <option value="600000">10 minutes</option>
+                </select>
+              </div>
+            ) : null}
+            <div className="settings-row">
+              <span className="settings-label">Your total checks</span>
               <span className="settings-value">{globalStats?.totalChecks?.toLocaleString() ?? "—"}</span>
             </div>
             <div className="settings-row">
-              <span className="settings-label">Bot alerts</span>
+              <span className="settings-label">Your bot alerts</span>
               <span className="settings-value">{globalStats?.totalBotAlerts ?? "—"}</span>
             </div>
             <div className="settings-row">
-              <span className="settings-label">Total incidents</span>
+              <span className="settings-label">Your total incidents</span>
               <span className="settings-value">{globalStats?.totalIncidents ?? "—"}</span>
             </div>
           </div>
 
-          {/* API reference */}
-          <div className="settings-card">
-            <h3 className="settings-card-title">📡 API Reference</h3>
-            <div className="code-block">{`GET    /api/sites
-POST   /api/sites
-DELETE /api/sites/:id
-POST   /api/sites/:id/check
-POST   /api/check-all
-GET    /api/logs?type=DOWN
-DELETE /api/logs
-GET    /api/stats
-GET    /api/settings
-POST   /api/settings
-POST   /api/settings/test-email`}</div>
-          </div>
+          {/* Admin SMTP Credentials */}
+          {globalStats?.isAdmin && (
+            <div className="settings-card">
+              <h3 className="settings-card-title">🔐 Global SMTP Setup (Admin)</h3>
+              <div className="field-group">
+                <label className="field-label">SMTP host</label>
+                <input className="field-input" type="text" value={form.smtpHost}
+                  onChange={(e) => set("smtpHost", e.target.value)} placeholder="mail.dynamite.agency" />
+              </div>
+              <div className="field-row">
+                <div className="field-group" style={{flex:1}}>
+                  <label className="field-label">Port</label>
+                  <input className="field-input" type="number" value={form.smtpPort}
+                    onChange={(e) => set("smtpPort", e.target.value)} placeholder="587" />
+                </div>
+              </div>
+              <div className="field-group">
+                <label className="field-label">SMTP username / email</label>
+                <input className="field-input" type="text" value={form.smtpUser}
+                  onChange={(e) => set("smtpUser", e.target.value)} placeholder="alerts@dynamite.agency" />
+              </div>
+              <div className="field-group">
+                <label className="field-label">SMTP password</label>
+                <div className="pass-wrap">
+                  <input className="field-input" type={showPass ? "text" : "password"}
+                    value={form.smtpPass}
+                    onChange={(e) => set("smtpPass", e.target.value)}
+                    onFocus={() => { if (form.smtpPass === MASKED) set("smtpPass", ""); }}
+                    placeholder="Enter password to update" />
+                  <button type="button" className="pass-toggle" onClick={() => setShowPass((v) => !v)}>
+                    {showPass ? "🙈" : "👁"}
+                  </button>
+                </div>
+              </div>
+              <div className="field-group">
+                <label className="field-label">From address</label>
+                <input className="field-input" type="text" value={form.smtpFrom}
+                  onChange={(e) => set("smtpFrom", e.target.value)} placeholder="Uptime Monitor <alerts@dynamite.agency>" />
+              </div>
+            </div>
+          )}
 
         </div>
 
         {/* Action bar */}
         <div className="settings-actions">
-          <button type="button" id="test-email-btn" className="btn btn-ghost" onClick={testEmail} disabled={testing || !globalStats?.emailEnabled}>
+          <button type="button" className="btn btn-ghost" onClick={testEmail} disabled={testing || !globalStats?.emailEnabled}>
             {testing ? <span className="spinner" /> : "📨"} Send test email
           </button>
-          <button type="submit" id="save-settings-btn" className="btn btn-primary" disabled={saving}>
+          <button type="submit" className="btn btn-primary" disabled={saving}>
             {saving ? <span className="spinner" /> : "💾"} Save settings
           </button>
         </div>
@@ -596,68 +495,89 @@ POST   /api/settings/test-email`}</div>
   );
 }
 
-// ── Main App ──────────────────────────────────────────────────────────────────
+// ── App Container ─────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab,         setTab]   = useState("dashboard");
-  const [sites,       setSites] = useState([]);
-  const [globalStats, setStats] = useState(null);
-  const [loading,     setLoad]  = useState(true);
-  const intervalRef = useRef(null);
+  const [user, setUser] = useState(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
 
-  const fetchSites = useCallback(async () => {
-    try {
-      const [sRes, stRes] = await Promise.all([fetch(`${API}/sites`), fetch(`${API}/stats`)]);
-      const [sData, stData] = await Promise.all([sRes.json(), stRes.json()]);
-      setSites(Array.isArray(sData) ? sData : []);
-      setStats(stData);
-    } catch { /* silent */ }
-    finally { setLoad(false); }
+  const [sites, setSites] = useState([]);
+  const [globalStats, setGlobalStats] = useState(null);
+  const [tab, setTab] = useState("dashboard"); // dashboard, logs, incidents, settings
+  const [loadingSites, setLoadingSites] = useState(true);
+
+  // Check existing token
+  useEffect(() => {
+    const token = localStorage.getItem("uptime_token");
+    if (token) {
+      fetch(`${API}/auth/me`, { headers: { "Authorization": `Bearer ${token}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (data) setUser(data);
+          else localStorage.removeItem("uptime_token");
+        })
+        .finally(() => setLoadingAuth(false));
+    } else {
+      setLoadingAuth(false);
+    }
   }, []);
 
-  useEffect(() => {
-    fetchSites();
-    intervalRef.current = setInterval(fetchSites, 30_000);
-    return () => clearInterval(intervalRef.current);
-  }, [fetchSites]);
+  const fetchSites = () => {
+    if (!user) return;
+    const token = localStorage.getItem("uptime_token");
+    fetch(`${API}/sites`, { headers: { "Authorization": `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { setSites(d); setLoadingSites(false); });
 
-  const allDown = sites.filter((s) => siteStatus(s) === "down").length;
+    fetch(`${API}/stats`, { headers: { "Authorization": `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(setGlobalStats);
+  };
 
-  const TABS = [
-    { id:"dashboard", label:"Dashboard" },
-    { id:"logs",      label:"Logs" },
-    { id:"incidents", label:`Incidents${globalStats?.totalIncidents ? ` (${globalStats.totalIncidents})` : ""}` },
-    { id:"settings",  label:"Settings" },
-  ];
+  useEffect(fetchSites, [user]);
+
+  function logout() {
+    localStorage.removeItem("uptime_token");
+    setUser(null);
+  }
+
+  if (loadingAuth) return <div className="empty-state"><div className="emoji">⏳</div></div>;
+  if (!user) return <div><ToastContainer theme="dark" /><AuthScreen onLogin={setUser} /></div>;
+
+  const allUp = sites.every(s => s.latest?.up !== false);
 
   return (
     <div className="app">
       <header className="header">
-        <div className="header-left">
-          <div className={`logo-dot ${allDown > 0 ? "red" : "green"}`} />
-          <div>
-            <h1>Uptime Monitor</h1>
-            <div className="header-subtitle">
-              {allDown > 0 ? `⚠ ${allDown} site${allDown > 1 ? "s" : ""} down` : "All systems operational"} · auto-refresh 30s
-            </div>
+        <div>
+          <h1 className="logo">
+            <div className={`status-dot ${allUp ? "up" : "down"}`} />
+            Uptime Monitor
+          </h1>
+          <div className="system-status">
+            {allUp ? "All systems operational" : "Some systems are down"}
+            <span style={{margin: "0 8px"}}>·</span>
+            {user.email} {user.role === 'admin' ? "(Admin)" : ""}
           </div>
         </div>
-        <nav className="tab-nav" role="navigation">
-          {TABS.map((t) => (
-            <button key={t.id} id={`tab-${t.id}`} className={`tab-btn ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
-              {t.label}
-            </button>
-          ))}
-        </nav>
+        <div style={{display: "flex", gap: "1rem", alignItems: "center"}}>
+          <nav className="tabs">
+            <button className={`tab ${tab==="dashboard"?"active":""}`} onClick={()=>setTab("dashboard")}>Dashboard</button>
+            <button className={`tab ${tab==="logs"?"active":""}`} onClick={()=>setTab("logs")}>Logs</button>
+            <button className={`tab ${tab==="incidents"?"active":""}`} onClick={()=>setTab("incidents")}>Incidents</button>
+            <button className={`tab ${tab==="settings"?"active":""}`} onClick={()=>setTab("settings")}>Settings</button>
+          </nav>
+          <button className="btn btn-ghost" onClick={logout}>Logout</button>
+        </div>
       </header>
 
-      <main>
-        {tab === "dashboard" && <DashboardTab sites={sites} globalStats={globalStats} loading={loading} onRefresh={fetchSites} />}
+      <main className="main-content">
+        {tab === "dashboard" && <DashboardTab sites={sites} globalStats={globalStats} loading={loadingSites} onRefresh={fetchSites} />}
         {tab === "logs"      && <LogsTab sites={sites} />}
         {tab === "incidents" && <IncidentsTab sites={sites} />}
         {tab === "settings"  && <SettingsTab globalStats={globalStats} onStatsRefresh={fetchSites} />}
       </main>
 
-      <ToastContainer />
+      <ToastContainer theme="dark" position="bottom-right" />
     </div>
   );
 }

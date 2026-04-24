@@ -4,49 +4,44 @@ const cors       = require("cors");
 const fs         = require("fs");
 const path       = require("path");
 const nodemailer = require("nodemailer");
+const jwt        = require("jsonwebtoken");
+const bcrypt     = require("bcryptjs");
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "db.json");
+const JWT_SECRET = process.env.JWT_SECRET || "dynamite-super-secret-key-change-in-prod";
 
-// ─── Mutable live config (env vars → db.settings override) ───────────────────
+// ─── Global Config (Admin controlled) ────────────────────────────────────────
 let cfg = {
   smtpHost:        process.env.SMTP_HOST        || "mail.dynamite.agency",
   smtpPort:        parseInt(process.env.SMTP_PORT || "587"),
   smtpUser:        process.env.SMTP_USER        || "",
   smtpPass:        process.env.SMTP_PASS        || "",
   smtpFrom:        process.env.SMTP_FROM        || "Uptime Monitor <alerts@dynamite.agency>",
-  alertEmail:      process.env.ALERT_EMAIL      || "kamva@dynamite.agency",
-  emailCooldownMs: parseInt(process.env.EMAIL_COOLDOWN_MS || "1800000"),
   checkIntervalMs: parseInt(process.env.CHECK_INTERVAL_MS || "60000"),
   emailEnabled:    false,
 };
 
-// ─── JSON "database" ──────────────────────────────────────────────────────────
+// ─── Database ─────────────────────────────────────────────────────────────────
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 function loadDB() {
   try { return JSON.parse(fs.readFileSync(DB_PATH, "utf8")); }
-  catch { return { sites: [], checks: [], logs: [], settings: {}, _nextId: 1 }; }
+  catch { return { users: [], sites: [], checks: [], logs: [], settings: {}, _nextId: 1 }; }
 }
-function saveDB(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-}
+function saveDB(db) { fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2)); }
 
-// Merge saved settings from db into cfg on startup
 function loadPersistedSettings() {
   const db = loadDB();
-  if (db.settings && Object.keys(db.settings).length) {
-    Object.assign(cfg, db.settings);
-  }
+  if (db.settings && Object.keys(db.settings).length) Object.assign(cfg, db.settings);
 }
-
 function persistSettings() {
   const db = loadDB();
   db.settings = { ...cfg };
   saveDB(db);
 }
 
-// ─── Mailer (can be reinitialized after settings change) ──────────────────────
+// ─── Mailer ───────────────────────────────────────────────────────────────────
 let mailer = null;
 function initMailer() {
   if (cfg.smtpUser && cfg.smtpPass) {
@@ -55,6 +50,7 @@ function initMailer() {
       port:   cfg.smtpPort,
       secure: cfg.smtpPort === 465,
       auth:   { user: cfg.smtpUser, pass: cfg.smtpPass },
+      tls:    { rejectUnauthorized: false } // Fixed for Xneelo strict TLS issues
     });
     cfg.emailEnabled = true;
   } else {
@@ -63,11 +59,12 @@ function initMailer() {
   }
 }
 
-async function sendEmail(subject, html) {
+async function sendEmail(to, subject, html) {
   if (!mailer) { console.log(`[EMAIL] Not configured — skipping: ${subject}`); return false; }
+  if (!to) { console.log(`[EMAIL] No recipient configured — skipping: ${subject}`); return false; }
   try {
-    await mailer.sendMail({ from: cfg.smtpFrom, to: cfg.alertEmail, subject, html });
-    console.log(`[EMAIL] Sent: ${subject}`);
+    await mailer.sendMail({ from: cfg.smtpFrom, to, subject, html });
+    console.log(`[EMAIL] Sent to ${to}: ${subject}`);
     return true;
   } catch (err) {
     console.error(`[EMAIL] Failed: ${err.message}`);
@@ -84,8 +81,6 @@ function downEmailHtml(site, result) {
       <p>URL: <a href="${site.url}" style="color:#3b82f6">${site.url}</a></p>
       <p>HTTP Status: ${result.statusCode ?? "No response / timeout"}</p>
       <p>Detected at: ${new Date().toUTCString()}</p>
-      <hr style="border:1px solid #334155;margin:16px 0"/>
-      <p style="color:#94a3b8;font-size:12px">Uptime Monitor · dynamite.agency</p>
     </div></div>`;
 }
 
@@ -98,8 +93,6 @@ function recoveryEmailHtml(site, result) {
       <p>URL: <a href="${site.url}" style="color:#3b82f6">${site.url}</a></p>
       <p>HTTP Status: ${result.statusCode}</p>
       <p>Recovered at: ${new Date().toUTCString()}</p>
-      <hr style="border:1px solid #334155;margin:16px 0"/>
-      <p style="color:#94a3b8;font-size:12px">Uptime Monitor · dynamite.agency</p>
     </div></div>`;
 }
 
@@ -110,48 +103,13 @@ function getSiteState(id) {
   return siteState[id];
 }
 
-// ─── Bot detection ────────────────────────────────────────────────────────────
-const BOT_UA_PATTERNS = [
-  /curl/i, /python-requests/i, /wget/i, /sqlmap/i, /nikto/i,
-  /masscan/i, /nmap/i, /zgrab/i, /gobuster/i, /dirbuster/i,
-  /nuclei/i, /burpsuite/i, /hydra/i, /metasploit/i,
-  /(?<!google|bing|slack)bot\b/i, /crawler/i, /scraper/i,
-];
-const ipCounters = {};
-const RATE_WINDOW = 10_000;
-const RATE_LIMIT  = 40;
-
-function botMiddleware(req, res, next) {
-  const ua = req.headers["user-agent"] || "";
-  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim()
-          || req.socket?.remoteAddress || "unknown";
-
-  if (BOT_UA_PATTERNS.some((p) => p.test(ua))) {
-    addLog("BOT", null, null, `Scanner/bot UA detected from ${ip}`, {
-      ip, ua: ua.substring(0, 200), path: req.path, reason: "suspicious_ua",
-    });
-  }
-  const now = Date.now();
-  if (!ipCounters[ip] || now - ipCounters[ip].windowStart > RATE_WINDOW) {
-    ipCounters[ip] = { count: 1, windowStart: now };
-  } else {
-    ipCounters[ip].count++;
-    if (ipCounters[ip].count === RATE_LIMIT) {
-      addLog("BOT", null, null, `Rate limit hit from ${ip}`, {
-        ip, path: req.path, reqsPer10s: ipCounters[ip].count, reason: "rate_limit",
-      });
-    }
-  }
-  next();
-}
-
 // ─── Logging ──────────────────────────────────────────────────────────────────
-function addLog(type, siteId, siteName, message, meta = {}) {
+function addLog(userId, type, siteId, siteName, message, meta = {}) {
   const db = loadDB();
   if (!db.logs) db.logs = [];
-  db.logs.push({ id: db._nextId++, type, siteId: siteId ?? null,
+  db.logs.push({ id: db._nextId++, userId, type, siteId: siteId ?? null,
     siteName: siteName ?? null, message, meta, createdAt: Date.now() });
-  if (db.logs.length > 5000) db.logs = db.logs.slice(-5000);
+  if (db.logs.length > 10000) db.logs = db.logs.slice(-10000);
   saveDB(db);
   console.log(`[${type}] ${message}`);
 }
@@ -162,7 +120,7 @@ async function ping(url) {
   try {
     const res = await axios.get(url, {
       timeout: 10000, validateStatus: () => true, maxRedirects: 5,
-      headers: { "User-Agent": "UptimeMonitorBot/1.0" },
+      headers: { "User-Agent": "UptimeMonitorBot/2.0" },
     });
     return { up: res.status < 500, statusCode: res.status, responseMs: Date.now() - start };
   } catch (err) {
@@ -174,200 +132,286 @@ function recordCheck(siteId, result) {
   const db = loadDB();
   db.checks.push({ id: db._nextId++, siteId, up: result.up,
     statusCode: result.statusCode, responseMs: result.responseMs, checkedAt: Date.now() });
-  if (db.checks.length > 2000) db.checks = db.checks.slice(-2000);
+  if (db.checks.length > 5000) db.checks = db.checks.slice(-5000);
   saveDB(db);
 }
 
-function enrichSite(site, db) {
-  const now = Date.now();
-  const siteChecks  = db.checks.filter((c) => c.siteId === site.id);
-  const latest      = siteChecks[siteChecks.length - 1] || null;
-  const checks24h   = siteChecks.filter((c) => c.checkedAt > now - 86400_000);
-  const upChecks24h = checks24h.filter((c) => c.up && c.responseMs != null);
-
-  const uptimePct = checks24h.length
-    ? Math.round((checks24h.filter((c) => c.up).length / checks24h.length) * 100) : null;
-  const avgResponseMs = upChecks24h.length
-    ? Math.round(upChecks24h.reduce((a, c) => a + c.responseMs, 0) / upChecks24h.length) : null;
-
-  return { ...site, latest, uptimePct, avgResponseMs, history: siteChecks.slice(-48).map((c) => c.up) };
-}
-
 // ─── Alert handler ────────────────────────────────────────────────────────────
-async function handleAlerts(site, result) {
+async function handleAlerts(site, user, result) {
   const st  = getSiteState(site.id);
   const now = Date.now();
   if (st.wasUp === null) { st.wasUp = result.up; return; }
 
+  const alertEmail = user.alertEmail || user.email;
+  const cooldownMs = user.emailCooldownMs || 1800000;
+
   if (st.wasUp && !result.up) {
     st.wasUp = false; st.wentDownAt = now; st.lastAlertAt = now;
     const msg = `${site.name} went DOWN — HTTP ${result.statusCode ?? "timeout"}`;
-    addLog("DOWN", site.id, site.name, msg, { statusCode: result.statusCode, url: site.url });
-    await sendEmail(`🔴 ALERT: ${site.name} is DOWN`, downEmailHtml(site, result));
+    addLog(user.id, "DOWN", site.id, site.name, msg, { statusCode: result.statusCode, url: site.url });
+    await sendEmail(alertEmail, `🔴 ALERT: ${site.name} is DOWN`, downEmailHtml(site, result));
 
   } else if (!st.wasUp && result.up) {
     const downDuration = st.wentDownAt ? now - st.wentDownAt : null;
     st.wasUp = true; st.wentDownAt = null;
     const msg = `${site.name} recovered — back ONLINE${downDuration ? ` after ${Math.round(downDuration/60000)}m` : ""}`;
-    addLog("RECOVERY", site.id, site.name, msg, { statusCode: result.statusCode, url: site.url, downDurationMs: downDuration });
-    await sendEmail(`✅ RECOVERY: ${site.name} is back UP`, recoveryEmailHtml(site, result));
+    addLog(user.id, "RECOVERY", site.id, site.name, msg, { statusCode: result.statusCode, url: site.url, downDurationMs: downDuration });
+    await sendEmail(alertEmail, `✅ RECOVERY: ${site.name} is back UP`, recoveryEmailHtml(site, result));
 
-  } else if (!result.up && (now - st.lastAlertAt) > cfg.emailCooldownMs) {
+  } else if (!result.up && (now - st.lastAlertAt) > cooldownMs) {
     st.lastAlertAt = now;
-    addLog("DOWN", site.id, site.name, `${site.name} still DOWN (reminder)`, { statusCode: result.statusCode, url: site.url, reminder: true });
-    await sendEmail(`🔴 REMINDER: ${site.name} is still DOWN`, downEmailHtml(site, result));
+    addLog(user.id, "DOWN", site.id, site.name, `${site.name} still DOWN (reminder)`, { statusCode: result.statusCode, url: site.url, reminder: true });
+    await sendEmail(alertEmail, `🔴 REMINDER: ${site.name} is still DOWN`, downEmailHtml(site, result));
   }
 }
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
-app.use(botMiddleware);
 
-// ─── Site Routes ──────────────────────────────────────────────────────────────
-app.get("/sites", (req, res) => {
+const authMiddleware = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+const adminMiddleware = (req, res, next) => {
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only" });
+  next();
+};
+
+// ─── Auth Routes ──────────────────────────────────────────────────────────────
+app.post("/auth/register", (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
   const db = loadDB();
-  res.json(db.sites.map((s) => enrichSite(s, db)));
+  if (!db.users) db.users = [];
+  if (db.users.find(u => u.email === email)) return res.status(400).json({ error: "Email already exists" });
+
+  const role = db.users.length === 0 ? "admin" : "user";
+  const user = {
+    id: db._nextId++,
+    email,
+    passwordHash: bcrypt.hashSync(password, 10),
+    role,
+    alertEmail: email,
+    emailCooldownMs: 1800000,
+    createdAt: Date.now()
+  };
+  db.users.push(user);
+  saveDB(db);
+
+  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  res.status(201).json({ token, user: { id: user.id, email: user.email, role: user.role } });
 });
 
-app.post("/sites", (req, res) => {
+app.post("/auth/login", (req, res) => {
+  const { email, password } = req.body;
+  const db = loadDB();
+  const user = (db.users || []).find(u => u.email === email);
+  if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, user: { id: user.id, email: user.email, role: user.role } });
+});
+
+app.get("/auth/me", authMiddleware, (req, res) => {
+  res.json(req.user);
+});
+
+// ─── Protected Routes ─────────────────────────────────────────────────────────
+
+app.get("/sites", authMiddleware, (req, res) => {
+  const db = loadDB();
+  const userSites = db.sites.filter(s => s.userId === req.user.id);
+  
+  const enriched = userSites.map((site) => {
+    const now = Date.now();
+    const siteChecks  = db.checks.filter((c) => c.siteId === site.id);
+    const latest      = siteChecks[siteChecks.length - 1] || null;
+    const checks24h   = siteChecks.filter((c) => c.checkedAt > now - 86400_000);
+    const upChecks24h = checks24h.filter((c) => c.up && c.responseMs != null);
+
+    const uptimePct = checks24h.length
+      ? Math.round((checks24h.filter((c) => c.up).length / checks24h.length) * 100) : null;
+    const avgResponseMs = upChecks24h.length
+      ? Math.round(upChecks24h.reduce((a, c) => a + c.responseMs, 0) / upChecks24h.length) : null;
+
+    return { ...site, latest, uptimePct, avgResponseMs, history: siteChecks.slice(-48).map((c) => c.up) };
+  });
+  res.json(enriched);
+});
+
+app.post("/sites", authMiddleware, (req, res) => {
   const { name, url } = req.body;
   if (!url) return res.status(400).json({ error: "url is required" });
   const db = loadDB();
-  if (db.sites.find((s) => s.url === url))
-    return res.status(409).json({ error: "Site already exists" });
-  const site = { id: db._nextId++, name: name || url, url, createdAt: Date.now() };
+  const site = { id: db._nextId++, userId: req.user.id, name: name || url, url, createdAt: Date.now() };
   db.sites.push(site); saveDB(db);
-  addLog("INFO", site.id, site.name, `Site added: ${site.url}`);
+  addLog(req.user.id, "INFO", site.id, site.name, `Site added: ${site.url}`);
   ping(url).then((result) => recordCheck(site.id, result));
   res.status(201).json(site);
 });
 
-app.delete("/sites/:id", (req, res) => {
+app.delete("/sites/:id", authMiddleware, (req, res) => {
   const id = parseInt(req.params.id);
   const db = loadDB();
-  const site = db.sites.find((s) => s.id === id);
-  if (site) addLog("INFO", id, site.name, `Site removed: ${site.url}`);
+  const site = db.sites.find((s) => s.id === id && s.userId === req.user.id);
+  if (!site) return res.status(404).json({ error: "Site not found" });
+  
+  addLog(req.user.id, "INFO", id, site.name, `Site removed: ${site.url}`);
   db.sites  = db.sites.filter((s) => s.id !== id);
   db.checks = db.checks.filter((c) => c.siteId !== id);
   saveDB(db); delete siteState[id]; res.json({ ok: true });
 });
 
-app.post("/sites/:id/check", async (req, res) => {
+app.post("/sites/:id/check", authMiddleware, async (req, res) => {
   const id = parseInt(req.params.id);
   const db = loadDB();
-  const site = db.sites.find((s) => s.id === id);
+  const site = db.sites.find((s) => s.id === id && s.userId === req.user.id);
   if (!site) return res.status(404).json({ error: "Not found" });
+  const user = db.users.find(u => u.id === req.user.id);
+  
   const result = await ping(site.url);
-  recordCheck(site.id, result); await handleAlerts(site, result); res.json(result);
+  recordCheck(site.id, result); await handleAlerts(site, user, result); res.json(result);
 });
 
-app.post("/check-all", async (req, res) => {
+app.post("/check-all", authMiddleware, async (req, res) => {
   const db = loadDB();
-  const results = await Promise.all(db.sites.map(async (site) => {
+  const userSites = db.sites.filter(s => s.userId === req.user.id);
+  const user = db.users.find(u => u.id === req.user.id);
+  
+  const results = await Promise.all(userSites.map(async (site) => {
     const result = await ping(site.url);
-    recordCheck(site.id, result); await handleAlerts(site, result);
+    recordCheck(site.id, result); await handleAlerts(site, user, result);
     return { site: site.name, ...result };
   }));
   res.json(results);
 });
 
-app.get("/sites/:id/checks", (req, res) => {
-  const id    = parseInt(req.params.id);
+app.get("/sites/:id/checks", authMiddleware, (req, res) => {
+  const id = parseInt(req.params.id);
   const limit = parseInt(req.query.limit || "100");
-  const db    = loadDB();
+  const db = loadDB();
+  const site = db.sites.find((s) => s.id === id && s.userId === req.user.id);
+  if (!site) return res.status(404).json({ error: "Not found" });
   res.json(db.checks.filter((c) => c.siteId === id).slice(-limit).reverse());
 });
 
-// ─── Log Routes ──────────────────────────────────────────────────────────────
-app.get("/logs", (req, res) => {
+app.get("/logs", authMiddleware, (req, res) => {
   const db = loadDB();
-  let logs = db.logs || [];
+  let logs = (db.logs || []).filter(l => l.userId === req.user.id);
   const { type, siteId, limit = 200 } = req.query;
   if (type)   logs = logs.filter((l) => l.type === type);
   if (siteId) logs = logs.filter((l) => l.siteId === parseInt(siteId));
   res.json(logs.slice(-parseInt(limit)).reverse());
 });
 
-app.delete("/logs", (req, res) => {
-  const db = loadDB(); db.logs = []; saveDB(db);
-  addLog("INFO", null, null, "All logs cleared by admin");
+app.delete("/logs", authMiddleware, (req, res) => {
+  const db = loadDB(); 
+  db.logs = (db.logs || []).filter(l => l.userId !== req.user.id); 
+  saveDB(db);
+  addLog(req.user.id, "INFO", null, null, "All logs cleared by user");
   res.json({ ok: true });
 });
 
-// ─── Stats Route ──────────────────────────────────────────────────────────────
-app.get("/stats", (req, res) => {
+app.get("/stats", authMiddleware, (req, res) => {
   const db  = loadDB();
+  const userSites = db.sites.filter(s => s.userId === req.user.id);
+  const siteIds = userSites.map(s => s.id);
   const now = Date.now();
-  const checks24h   = db.checks.filter((c) => c.checkedAt > now - 86400_000);
+  
+  const checks24h   = db.checks.filter((c) => siteIds.includes(c.siteId) && c.checkedAt > now - 86400_000);
   const upChecks24h = checks24h.filter((c) => c.up && c.responseMs != null);
   const avgResponseMs = upChecks24h.length
     ? Math.round(upChecks24h.reduce((a, c) => a + c.responseMs, 0) / upChecks24h.length) : null;
-  const logs = db.logs || [];
+  
+  const logs = (db.logs || []).filter(l => l.userId === req.user.id);
   res.json({
-    totalSites:      db.sites.length,
-    totalChecks:     db.checks.length,
+    totalSites:      userSites.length,
+    totalChecks:     db.checks.filter(c => siteIds.includes(c.siteId)).length,
     avgResponseMs,
     totalIncidents:  logs.filter((l) => l.type === "DOWN" && !l.meta?.reminder).length,
     totalRecoveries: logs.filter((l) => l.type === "RECOVERY").length,
     totalBotAlerts:  logs.filter((l) => l.type === "BOT").length,
     emailEnabled:    cfg.emailEnabled,
-    alertEmail:      cfg.alertEmail,
-    checkIntervalMs: cfg.checkIntervalMs,
+    isAdmin:         req.user.role === "admin"
   });
 });
 
 // ─── Settings Routes ──────────────────────────────────────────────────────────
-app.get("/settings", (req, res) => {
-  res.json({
-    smtpHost:        cfg.smtpHost,
-    smtpPort:        cfg.smtpPort,
-    smtpUser:        cfg.smtpUser,
-    smtpPassSet:     !!cfg.smtpPass,   // never expose raw password
-    smtpFrom:        cfg.smtpFrom,
-    alertEmail:      cfg.alertEmail,
-    emailCooldownMs: cfg.emailCooldownMs,
-    checkIntervalMs: cfg.checkIntervalMs,
-    emailEnabled:    cfg.emailEnabled,
-  });
-});
-
-app.post("/settings", (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
-          alertEmail, emailCooldownMs, checkIntervalMs } = req.body;
-
-  if (smtpHost        !== undefined) cfg.smtpHost        = smtpHost;
-  if (smtpPort        !== undefined) cfg.smtpPort        = parseInt(smtpPort);
-  if (smtpUser        !== undefined) cfg.smtpUser        = smtpUser;
-  // Only update password if caller sends a real new value (not masked placeholder)
-  if (smtpPass        !== undefined && smtpPass.trim() !== "" && !smtpPass.startsWith("•")) {
-    cfg.smtpPass = smtpPass;
+app.get("/settings", authMiddleware, (req, res) => {
+  const db = loadDB();
+  const user = db.users.find(u => u.id === req.user.id);
+  const data = {
+    alertEmail:      user.alertEmail || user.email,
+    emailCooldownMs: user.emailCooldownMs || 1800000,
+  };
+  // Only admin sees global SMTP config
+  if (req.user.role === "admin") {
+    Object.assign(data, {
+      smtpHost:        cfg.smtpHost,
+      smtpPort:        cfg.smtpPort,
+      smtpUser:        cfg.smtpUser,
+      smtpPassSet:     !!cfg.smtpPass,
+      smtpFrom:        cfg.smtpFrom,
+      checkIntervalMs: cfg.checkIntervalMs,
+    });
   }
-  if (smtpFrom        !== undefined) cfg.smtpFrom        = smtpFrom;
-  if (alertEmail      !== undefined) cfg.alertEmail      = alertEmail;
-  if (emailCooldownMs !== undefined) cfg.emailCooldownMs = parseInt(emailCooldownMs);
-
-  const intervalChanged = checkIntervalMs !== undefined &&
-    parseInt(checkIntervalMs) !== cfg.checkIntervalMs;
-  if (checkIntervalMs !== undefined) cfg.checkIntervalMs = parseInt(checkIntervalMs);
-
-  initMailer();
-  persistSettings();
-  if (intervalChanged) startScheduler();
-
-  addLog("INFO", null, null, "Settings updated via UI", {
-    alertEmail: cfg.alertEmail,
-    emailEnabled: cfg.emailEnabled,
-    checkIntervalMs: cfg.checkIntervalMs,
-  });
-
-  res.json({ ok: true, emailEnabled: cfg.emailEnabled, checkIntervalMs: cfg.checkIntervalMs });
+  res.json(data);
 });
 
-// POST /settings/test-email
-app.post("/settings/test-email", async (req, res) => {
-  if (!mailer) return res.status(400).json({ error: "Email not configured — set SMTP user & password first." });
+app.post("/settings", authMiddleware, (req, res) => {
+  const { alertEmail, emailCooldownMs, smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom, checkIntervalMs } = req.body;
+  const db = loadDB();
+  const user = db.users.find(u => u.id === req.user.id);
+  
+  if (alertEmail !== undefined) user.alertEmail = alertEmail;
+  if (emailCooldownMs !== undefined) user.emailCooldownMs = parseInt(emailCooldownMs);
+  saveDB(db);
+
+  let intervalChanged = false;
+  
+  // Admin only updates
+  if (req.user.role === "admin") {
+    if (smtpHost !== undefined) cfg.smtpHost = smtpHost;
+    if (smtpPort !== undefined) cfg.smtpPort = parseInt(smtpPort);
+    if (smtpUser !== undefined) cfg.smtpUser = smtpUser;
+    if (smtpPass !== undefined && smtpPass.trim() !== "" && !smtpPass.startsWith("•")) {
+      cfg.smtpPass = smtpPass;
+    }
+    if (smtpFrom !== undefined) cfg.smtpFrom = smtpFrom;
+    if (checkIntervalMs !== undefined) {
+      intervalChanged = parseInt(checkIntervalMs) !== cfg.checkIntervalMs;
+      cfg.checkIntervalMs = parseInt(checkIntervalMs);
+    }
+    initMailer();
+    persistSettings();
+    if (intervalChanged) startScheduler();
+  }
+
+  addLog(req.user.id, "INFO", null, null, "Settings updated via UI");
+  res.json({ ok: true, emailEnabled: cfg.emailEnabled });
+});
+
+app.post("/settings/test-email", authMiddleware, async (req, res) => {
+  if (!mailer) return res.status(400).json({ error: "Email not configured — admin must set SMTP user & password first." });
+  const db = loadDB();
+  const user = db.users.find(u => u.id === req.user.id);
+  const targetEmail = user.alertEmail || user.email;
+  
   const ok = await sendEmail(
+    targetEmail,
     "✅ Test — Uptime Monitor",
     `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;background:#1e293b;color:#e2e8f0;padding:28px;border-radius:10px">
       <h2 style="margin:0 0 12px">✅ Test email successful</h2>
@@ -375,21 +419,26 @@ app.post("/settings/test-email", async (req, res) => {
       <p style="color:#64748b;font-size:12px;margin-top:20px">dynamite.agency</p>
     </div>`
   );
-  if (ok) res.json({ ok: true });
-  else res.status(500).json({ error: "SMTP send failed — check your credentials." });
+  if (ok) res.json({ ok: true, message: `Sent to ${targetEmail}` });
+  else res.status(500).json({ error: "SMTP send failed — check credentials and logs." });
 });
 
 // ─── Scheduled checks ────────────────────────────────────────────────────────
 async function runScheduledChecks() {
   const db = loadDB();
-  if (!db.sites.length) return;
+  if (!db.sites || !db.sites.length) return;
   console.log(`[${new Date().toISOString()}] Scheduled check — ${db.sites.length} site(s)`);
+  
   await Promise.all(db.sites.map(async (site) => {
+    const user = db.users.find(u => u.id === site.userId);
+    if (!user) return; // Orphaned site
+    
     const result = await ping(site.url);
     recordCheck(site.id, result);
-    await handleAlerts(site, result);
+    await handleAlerts(site, user, result);
+    
     if (!result.up && result.error) {
-      addLog("ERROR", site.id, site.name, `Ping error: ${result.error}`, { url: site.url });
+      addLog(user.id, "ERROR", site.id, site.name, `Ping error: ${result.error}`, { url: site.url });
     }
     console.log(`  ${result.up ? "UP  " : "DOWN"} ${site.url} (${result.responseMs ?? "—"}ms)`);
   }));
@@ -410,6 +459,6 @@ runScheduledChecks();
 
 app.listen(PORT, () => {
   console.log(`\nUptime monitor backend → http://localhost:${PORT}`);
-  console.log(`Email alerts : ${cfg.emailEnabled ? `ENABLED → ${cfg.alertEmail}` : "DISABLED (configure in Settings)"}`);
+  console.log(`Email system : ${cfg.emailEnabled ? `ENABLED` : "DISABLED"}`);
   console.log(`Check interval: ${cfg.checkIntervalMs / 1000}s\n`);
 });

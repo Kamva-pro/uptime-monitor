@@ -298,6 +298,35 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; -webkit-fon
 /* ── Empty State ─────────────────────────────────────────────────────────────── */
 .empty-state { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 4rem 2rem; color: var(--muted); text-align: center; }
 .empty-state .emoji { font-size: 3rem; }
+
+/* ── Auth Screen ─────────────────────────────────────────────────────────────── */
+.auth-wrapper {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg1); padding: 2rem;
+}
+.auth-card {
+  width: 100%; max-width: 400px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 2.5rem;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.auth-logo {
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 1.2rem; color: var(--text);
+  margin-bottom: 2rem;
+}
+.auth-title {
+  font-size: 1.1rem; font-weight: 600; text-align: center; margin-bottom: 1.5rem;
+}
+.auth-toggle {
+  text-align: center; margin-top: 1.5rem; font-size: .85rem; color: var(--muted);
+}
+.btn-link {
+  background: none; border: none; color: var(--accent); cursor: pointer;
+  font-weight: 500; font-size: inherit; font-family: inherit;
+}
+.btn-link:hover { text-decoration: underline; }
 .empty-state p { max-width: 320px; line-height: 1.6; }
 
 /* ── Toast ───────────────────────────────────────────────────────────────────── */
