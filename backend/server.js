@@ -26,7 +26,16 @@ let cfg = {
 // ─── Database ─────────────────────────────────────────────────────────────────
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 function loadDB() {
-  try { return JSON.parse(fs.readFileSync(DB_PATH, "utf8")); }
+  try { 
+    const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+    if (!db.users) db.users = [];
+    if (!db.sites) db.sites = [];
+    if (!db.checks) db.checks = [];
+    if (!db.logs) db.logs = [];
+    if (!db.settings) db.settings = {};
+    if (!db._nextId) db._nextId = 1;
+    return db;
+  }
   catch { return { users: [], sites: [], checks: [], logs: [], settings: {}, _nextId: 1 }; }
 }
 function saveDB(db) { fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2)); }
