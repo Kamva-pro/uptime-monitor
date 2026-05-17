@@ -238,6 +238,74 @@ app.get("/auth/me", authMiddleware, (req, res) => {
   res.json(req.user);
 });
 
+// ─── Temporary Admin Password Reset (REMOVE AFTER USE) ───────────────────────
+// Secret: change ADMIN_RESET_SECRET to something only you know
+const ADMIN_RESET_SECRET = process.env.ADMIN_RESET_SECRET || "dynamite-admin-reset-2024";
+app.post("/auth/admin-reset", (req, res) => {
+  const { secret, email, newPassword } = req.body;
+  if (!secret || secret !== ADMIN_RESET_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  if (!email || !newPassword) return res.status(400).json({ error: "email and newPassword required" });
+  const db = loadDB();
+  const user = (db.users || []).find(u => u.email === email);
+  if (!user) return res.status(404).json({ error: `No user found with email: ${email}` });
+  user.passwordHash = bcrypt.hashSync(newPassword, 10);
+  saveDB(db);
+  console.log(`[ADMIN-RESET] Password reset for ${email} via admin endpoint`);
+  res.json({ ok: true, message: `Password updated for ${email}. PLEASE REMOVE THIS ENDPOINT AFTER USE.` });
+});
+
+// ─── Forgot / Reset Password ──────────────────────────────────────────────────
+app.post("/auth/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email required" });
+  const db = loadDB();
+  const user = (db.users || []).find(u => u.email === email);
+  // Always respond OK so we don't leak which emails exist
+  if (!user) return res.json({ ok: true });
+
+  const resetToken = jwt.sign({ id: user.id, purpose: "reset" }, JWT_SECRET, { expiresIn: "1h" });
+  const resetUrl = `https://uptime.dynamite.agency/?resetToken=${resetToken}`;
+
+  const sent = await sendEmail(
+    email,
+    "🔑 Reset your Uptime Monitor password",
+    `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;background:#1e293b;color:#e2e8f0;padding:28px;border-radius:10px">
+      <h2 style="margin:0 0 12px">🔑 Password Reset</h2>
+      <p>Click the link below to set a new password. This link expires in 1 hour.</p>
+      <p><a href="${resetUrl}" style="color:#3b82f6">${resetUrl}</a></p>
+      <p style="color:#64748b;font-size:12px;margin-top:20px">If you didn't request this, ignore this email.</p>
+    </div>`
+  );
+
+  if (!sent) {
+    // Email not configured — log the link to console so admin can use it
+    console.log(`[RESET-LINK] Password reset link for ${email}:\n${resetUrl}`);
+  }
+
+  res.json({ ok: true });
+});
+
+app.post("/auth/reset-password", (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) return res.status(400).json({ error: "token and newPassword required" });
+  let decoded;
+  try {
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(400).json({ error: "Invalid or expired reset link" });
+  }
+  if (decoded.purpose !== "reset") return res.status(400).json({ error: "Invalid token type" });
+  const db = loadDB();
+  const user = (db.users || []).find(u => u.id === decoded.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  user.passwordHash = bcrypt.hashSync(newPassword, 10);
+  saveDB(db);
+  console.log(`[RESET] Password changed for ${user.email}`);
+  res.json({ ok: true });
+});
+
 // ─── Protected Routes ─────────────────────────────────────────────────────────
 
 app.get("/sites", authMiddleware, (req, res) => {

@@ -48,7 +48,7 @@ function getAuthHeaders() {
 
 // ── Auth Screen ──────────────────────────────────────────────────────────────
 function AuthScreen({ onLogin }) {
-  const [isLogin, setIsLogin] = useState(true);
+  const [mode, setMode] = useState("login"); // login | register | forgot
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -56,7 +56,19 @@ function AuthScreen({ onLogin }) {
   async function submit(e) {
     e.preventDefault();
     setLoading(true);
-    const endpoint = isLogin ? "/auth/login" : "/auth/register";
+    if (mode === "forgot") {
+      try {
+        await fetch(`${API}/auth/forgot-password`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email })
+        });
+        toast.success("If that email exists, a reset link has been sent (or printed to server logs).");
+        setMode("login");
+      } catch { toast.error("Request failed"); }
+      finally { setLoading(false); }
+      return;
+    }
+    const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
     try {
       const res = await fetch(`${API}${endpoint}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -73,6 +85,8 @@ function AuthScreen({ onLogin }) {
     }
   }
 
+  const titles = { login: "Welcome back", register: "Create an account", forgot: "Forgot password" };
+
   return (
     <div className="auth-wrapper">
       <div className="auth-card">
@@ -80,26 +94,92 @@ function AuthScreen({ onLogin }) {
           <div className="status-dot up" style={{marginRight: "8px"}} />
           Uptime Monitor
         </div>
-        <h2 className="auth-title">{isLogin ? "Welcome back" : "Create an account"}</h2>
+        <h2 className="auth-title">{titles[mode]}</h2>
         <form onSubmit={submit}>
           <div className="field-group">
             <label className="field-label">Email</label>
             <input type="email" required className="field-input" value={email} onChange={e => setEmail(e.target.value)} />
           </div>
-          <div className="field-group">
-            <label className="field-label">Password</label>
-            <input type="password" required className="field-input" value={password} onChange={e => setPassword(e.target.value)} />
-          </div>
+          {mode !== "forgot" && (
+            <div className="field-group">
+              <label className="field-label">Password</label>
+              <input type="password" required className="field-input" value={password} onChange={e => setPassword(e.target.value)} />
+            </div>
+          )}
+          {mode === "login" && (
+            <div style={{textAlign: "right", marginTop: "-0.25rem", marginBottom: "0.5rem"}}>
+              <button type="button" className="btn-link" style={{fontSize: "0.8rem"}} onClick={() => setMode("forgot")}>
+                Forgot password?
+              </button>
+            </div>
+          )}
           <button type="submit" className="btn btn-primary" style={{width: "100%", marginTop: "1rem"}} disabled={loading}>
-            {loading ? <span className="spinner" /> : (isLogin ? "Sign In" : "Register")}
+            {loading ? <span className="spinner" /> : mode === "login" ? "Sign In" : mode === "register" ? "Register" : "Send reset link"}
           </button>
         </form>
         <div className="auth-toggle">
-          {isLogin ? "Don't have an account? " : "Already have an account? "}
-          <button type="button" className="btn-link" onClick={() => setIsLogin(!isLogin)}>
-            {isLogin ? "Sign up" : "Log in"}
-          </button>
+          {mode === "forgot" ? (
+            <><span>Remember it? </span><button type="button" className="btn-link" onClick={() => setMode("login")}>Log in</button></>
+          ) : mode === "login" ? (
+            <>Don&apos;t have an account? <button type="button" className="btn-link" onClick={() => setMode("register")}>Sign up</button></>
+          ) : (
+            <>Already have an account? <button type="button" className="btn-link" onClick={() => setMode("login")}>Log in</button></>
+          )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Reset Password Screen ─────────────────────────────────────────────────────
+function ResetPasswordScreen({ token, onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm]   = useState("");
+  const [loading, setLoading]   = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (password !== confirm) { toast.error("Passwords don't match"); return; }
+    if (password.length < 6)  { toast.error("Password must be at least 6 characters"); return; }
+    setLoading(true);
+    try {
+      const res  = await fetch(`${API}/auth/reset-password`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, newPassword: password })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Reset failed");
+      toast.success("Password updated! You can now log in.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+      onDone();
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="auth-wrapper">
+      <div className="auth-card">
+        <div className="auth-logo">
+          <div className="status-dot up" style={{marginRight: "8px"}} />
+          Uptime Monitor
+        </div>
+        <h2 className="auth-title">Set new password</h2>
+        <form onSubmit={submit}>
+          <div className="field-group">
+            <label className="field-label">New password</label>
+            <input type="password" required className="field-input" value={password} onChange={e => setPassword(e.target.value)} />
+          </div>
+          <div className="field-group">
+            <label className="field-label">Confirm password</label>
+            <input type="password" required className="field-input" value={confirm} onChange={e => setConfirm(e.target.value)} />
+          </div>
+          <button type="submit" className="btn btn-primary" style={{width: "100%", marginTop: "1rem"}} disabled={loading}>
+            {loading ? <span className="spinner" /> : "Update password"}
+          </button>
+        </form>
       </div>
     </div>
   );
@@ -687,6 +767,18 @@ export default function App() {
   }
 
   if (loadingAuth) return <div className="empty-state"><p>Loading...</p></div>;
+
+  // Handle password reset token from URL
+  const resetToken = new URLSearchParams(window.location.search).get("resetToken");
+  if (resetToken) {
+    return (
+      <div>
+        <ToastContainer theme="dark" />
+        <ResetPasswordScreen token={resetToken} onDone={() => setLoadingAuth(false)} />
+      </div>
+    );
+  }
+
   if (!user) return <div><ToastContainer theme="dark" /><AuthScreen onLogin={setUser} /></div>;
 
   const allDown = sites.filter((s) => siteStatus(s) === "down").length;
